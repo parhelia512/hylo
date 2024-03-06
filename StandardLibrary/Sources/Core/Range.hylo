@@ -21,16 +21,18 @@ public type Range<Bound: SemiRegular> {
     &self.upper_bound = upper_bound
   }
 
+}
+
+public extension Range where Bound: Comparable {
+
   /// Returns `true` iff `x` is contained in `self`.
-  public fun contains<B: Comparable where Bound == B>(_ x: B) -> Bool {
-    let e = Pointer<Bound>(type_punning: pointer[to: x])
-    return (e.unsafe[] >= lower_bound) && (e.unsafe[] < upper_bound)
+  public fun contains(_ x: Bound) -> Bool {
+    return (x >= lower_bound) && (x < upper_bound)
   }
 
   /// Returns `true` iff `other` is contained in `self`.
-  public fun contains<B: Comparable where Bound == B>(_ other: Range<B>) -> Bool {
-    let e = Pointer<Self>(type_punning: pointer[to: other])
-    return (e.unsafe[].lower_bound >= self.lower_bound) && (e.unsafe[].upper_bound <= self.upper_bound)
+  public fun contains(_ other: Self) -> Bool {
+    return (other.lower_bound >= self.lower_bound) && (other.upper_bound <= self.upper_bound)
   }
 
 }
