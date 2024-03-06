@@ -97,18 +97,20 @@ extension AST {
     case VarDecl.self:
       traverse(self[n] as! VarDecl, notifying: &o)
 
+    case ArrowTypeExpr.self:
+      traverse(self[n] as! ArrowTypeExpr, notifying: &o)
     case BooleanLiteralExpr.self:
       traverse(self[n] as! BooleanLiteralExpr, notifying: &o)
     case BufferLiteralExpr.self:
       traverse(self[n] as! BufferLiteralExpr, notifying: &o)
+    case CaptureExpr.self:
+      traverse(self[n] as! CaptureExpr, notifying: &o)
     case CastExpr.self:
       traverse(self[n] as! CastExpr, notifying: &o)
     case ConditionalExpr.self:
       traverse(self[n] as! ConditionalExpr, notifying: &o)
-    case ConformanceLensTypeExpr.self:
-      traverse(self[n] as! ConformanceLensTypeExpr, notifying: &o)
-    case ErrorExpr.self:
-      traverse(self[n] as! ErrorExpr, notifying: &o)
+    case ConformanceLensExpr.self:
+      traverse(self[n] as! ConformanceLensExpr, notifying: &o)
     case ExistentialTypeExpr.self:
       traverse(self[n] as! ExistentialTypeExpr, notifying: &o)
     case FloatLiteralExpr.self:
@@ -121,22 +123,18 @@ extension AST {
       traverse(self[n] as! IntegerLiteralExpr, notifying: &o)
     case LambdaExpr.self:
       traverse(self[n] as! LambdaExpr, notifying: &o)
-    case LambdaTypeExpr.self:
-      traverse(self[n] as! LambdaTypeExpr, notifying: &o)
     case MapLiteralExpr.self:
       traverse(self[n] as! MapLiteralExpr, notifying: &o)
     case MatchExpr.self:
       traverse(self[n] as! MatchExpr, notifying: &o)
     case NameExpr.self:
       traverse(self[n] as! NameExpr, notifying: &o)
-    case NilLiteralExpr.self:
-      traverse(self[n] as! NilLiteralExpr, notifying: &o)
     case ParameterTypeExpr.self:
       traverse(self[n] as! ParameterTypeExpr, notifying: &o)
     case PragmaLiteralExpr.self:
       traverse(self[n] as! PragmaLiteralExpr, notifying: &o)
-    case RemoteExpr.self:
-      traverse(self[n] as! RemoteExpr, notifying: &o)
+    case RemoteTypeExpr.self:
+      traverse(self[n] as! RemoteTypeExpr, notifying: &o)
     case SequenceExpr.self:
       traverse(self[n] as! SequenceExpr, notifying: &o)
     case SpawnExpr.self:
@@ -153,8 +151,6 @@ extension AST {
       traverse(self[n] as! TupleTypeExpr, notifying: &o)
     case UnicodeScalarLiteralExpr.self:
       traverse(self[n] as! UnicodeScalarLiteralExpr, notifying: &o)
-    case UnionTypeExpr.self:
-      traverse(self[n] as! UnionTypeExpr, notifying: &o)
     case WildcardExpr.self:
       traverse(self[n] as! WildcardExpr, notifying: &o)
 
@@ -240,16 +236,6 @@ extension AST {
     }
   }
 
-  /// Visits `b` and its children in pre-order, notifying `o` when a node is entered or left.
-  public func walk<O: ASTWalkObserver>(functionBody b: FunctionBody, notifying o: inout O) {
-    switch b {
-    case .expr(let e):
-      walk(e, notifying: &o)
-    case .block(let s):
-      walk(s, notifying: &o)
-    }
-  }
-
   // MARK: Declarations
 
   /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
@@ -305,7 +291,7 @@ extension AST {
     walk(roots: n.parameters, notifying: &o)
     walk(n.receiver, notifying: &o)
     walk(n.output, notifying: &o)
-    n.body.map({ walk(functionBody: $0, notifying: &o) })
+    n.body.map({ (b) in walk(b.base, notifying: &o) })
   }
 
   /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
@@ -346,7 +332,7 @@ extension AST {
     _ n: MethodImpl, notifying o: inout O
   ) {
     walk(n.receiver, notifying: &o)
-    n.body.map({ walk(functionBody: $0, notifying: &o) })
+    n.body.map({ (b) in walk(b.base, notifying: &o) })
   }
 
   /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
@@ -401,7 +387,7 @@ extension AST {
     _ n: SubscriptImpl, notifying o: inout O
   ) {
     walk(n.receiver, notifying: &o)
-    n.body.map({ walk(functionBody: $0, notifying: &o) })
+    n.body.map({ (b) in walk(b.base, notifying: &o) })
   }
 
   /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
@@ -441,6 +427,13 @@ extension AST {
 
   /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
   public func traverse<O: ASTWalkObserver>(
+    _ n: CaptureExpr, notifying o: inout O
+  ) {
+    walk(n.source, notifying: &o)
+  }
+
+  /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
+  public func traverse<O: ASTWalkObserver>(
     _ n: CastExpr, notifying o: inout O
   ) {
     walk(n.left, notifying: &o)
@@ -458,16 +451,11 @@ extension AST {
 
   /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
   public func traverse<O: ASTWalkObserver>(
-    _ n: ConformanceLensTypeExpr, notifying o: inout O
+    _ n: ConformanceLensExpr, notifying o: inout O
   ) {
     walk(n.subject, notifying: &o)
     walk(n.lens, notifying: &o)
   }
-
-  /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
-  public func traverse<O: ASTWalkObserver>(
-    _ n: ErrorExpr, notifying o: inout O
-  ) {}
 
   /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
   public func traverse<O: ASTWalkObserver>(
@@ -511,7 +499,7 @@ extension AST {
 
   /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
   public func traverse<O: ASTWalkObserver>(
-    _ n: LambdaTypeExpr, notifying o: inout O
+    _ n: ArrowTypeExpr, notifying o: inout O
   ) {
     walk(n.environment, notifying: &o)
     walk(roots: n.parameters.map(\.type), notifying: &o)
@@ -546,11 +534,6 @@ extension AST {
 
   /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
   public func traverse<O: ASTWalkObserver>(
-    _ n: NilLiteralExpr, notifying o: inout O
-  ) {}
-
-  /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
-  public func traverse<O: ASTWalkObserver>(
     _ n: ParameterTypeExpr, notifying o: inout O
   ) {
     walk(n.bareType, notifying: &o)
@@ -563,7 +546,7 @@ extension AST {
 
   /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
   public func traverse<O: ASTWalkObserver>(
-    _ n: RemoteExpr, notifying o: inout O
+    _ n: RemoteTypeExpr, notifying o: inout O
   ) {
     walk(n.operand, notifying: &o)
   }
@@ -624,13 +607,6 @@ extension AST {
   public func traverse<O: ASTWalkObserver>(
     _ n: UnicodeScalarLiteralExpr, notifying o: inout O
   ) {}
-
-  /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
-  public func traverse<O: ASTWalkObserver>(
-    _ n: UnionTypeExpr, notifying o: inout O
-  ) {
-    walk(roots: n.elements, notifying: &o)
-  }
 
   /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
   public func traverse<O: ASTWalkObserver>(
@@ -706,7 +682,7 @@ extension AST {
   public func traverse<O: ASTWalkObserver>(
     _ n: ConditionalCompilationStmt, notifying o: inout O
   ) {
-    walk(roots: n.expansion, notifying: &o)
+    walk(roots: n.expansion(for: compilationConditions), notifying: &o)
   }
 
   /// Visits the children of `n` in pre-order, notifying `o` when a node is entered or left.
@@ -823,7 +799,7 @@ extension AST {
     constraintExpr c: WhereClause.ConstraintExpr, notifying o: inout O
   ) {
     switch c {
-    case .conformance(let lhs, let traits):
+    case .bound(let lhs, let traits):
       walk(lhs, notifying: &o)
       for t in traits { walk(t, notifying: &o) }
     case .equality(let lhs, let rhs):

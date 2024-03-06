@@ -22,6 +22,15 @@ public struct Conformance {
       }
     }
 
+    /// `true` iff `self` is synthetic.
+    public var isSynthetic: Bool {
+      if case .synthetic = self {
+        return true
+      } else {
+        return false
+      }
+    }
+
   }
 
   /// The type on the left-hand side of this conformance.
@@ -48,6 +57,9 @@ public struct Conformance {
   /// `true` iff the conformance is implicitly synthesized for a structural type.
   public let isStructural: Bool
 
+  /// `true` iff all implementations in the conformance are synthetic.
+  public let isSynthetic: Bool
+
   /// Creates an instance with the given properties.
   public init(
     model: AnyType,
@@ -66,6 +78,7 @@ public struct Conformance {
     self.scope = scope
     self.implementations = implementations
     self.isStructural = isStructural
+    self.isSynthetic = implementations.values.allSatisfy(\.isSynthetic)
     self.origin = origin
   }
 

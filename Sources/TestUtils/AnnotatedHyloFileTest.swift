@@ -9,7 +9,7 @@ extension Diagnostic {
   fileprivate var expectation: TestAnnotation {
     TestAnnotation(
       in: site.file.url,
-      atLine: site.first().line.number,
+      atLine: site.start.line.number,
       parsing: "diagnostic " + message
     )
   }
@@ -187,6 +187,25 @@ extension XCTestCase {
     }
   }
 
+  /// Compiles the hylo file at `hyloFilePath` up until emitting LLVM code, `XCTAssert`ing that diagnostics and exit
+  /// codes match annotated expectations.
+  public func compileToLLVM(_ hyloFilePath: String, expectSuccess: Bool) throws {
+    if swiftyLLVMMandatoryPassesCrash { return }
+    try checkAnnotatedHyloFileDiagnostics(inFileAt: hyloFilePath, expectSuccess: expectSuccess) {
+      (hyloSource, diagnostics) in
+
+      do {
+        let _ = try compile(hyloSource.url, with: ["--emit", "llvm"])
+      } catch let d as DiagnosticSet {
+        // Recapture the diagnostics so the annotation testing framework can use them.  The need for
+        // this ugliness makes me wonder how important it is to test cli.execute, which after all is
+        // just a thin wrapper over cli.executeCommand (currently private).
+        diagnostics = d
+        throw d
+      }
+    }
+  }
+
   /// Compiles `input` with the given arguments and returns the URL of the output file, throwing
   /// diagnostics if there are any errors.
   public func compile(_ input: URL, with arguments: [String]) throws -> URL {
@@ -213,11 +232,5 @@ extension XCTestCase {
 
     return output
   }
-
-}
-
-struct NonzeroExitCode: Error {
-
-  var value: Int32
 
 }

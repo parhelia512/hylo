@@ -54,7 +54,7 @@ public type DynamicBuffer<Header: Deinitializable, Element>: Deinitializable, Mo
   public fun first_element_address() -> PointerToMutable<Element> {
     // TODO: Uncomment the following line when #995 is fixed
     // precondition(self.capacity() > 0)
-    PointerToMutable<Element>(type_punning: storage.advance(by_bytes: payload_offset()))
+    PointerToMutable<Element>(type_punning: storage.advance(by: payload_offset()))
   }
 
   /// Deinitializes `self`.
@@ -79,24 +79,12 @@ public type DynamicBuffer<Header: Deinitializable, Element>: Deinitializable, Mo
   /// - Requires: `capacity() > 0`.
   public property header: Header {
     let { buffer_header().unsafe[].1 }
-    inout { &buffer_header().unsafe[].1 }
+    inout { &(buffer_header()).unsafe[].1 }
   }
 
   /// Returns the address of the `self`'s header.
   fun buffer_header() -> PointerToMutable<BufferHeader> {
     PointerToMutable<BufferHeader>(type_punning: storage)
-  }
-
-}
-
-// TODO: This trait was added as a workaround for #1002 since DynamicBuffer
-// is initialized in the Array constructor
-public conformance DynamicBuffer: Movable {
-
-  fun take_value(from source: sink Self) -> {self: Self, Void} {
-    // TODO: Fix defects preventing the following line from working
-    // &storage.base = source.storage.base
-    (self: source, ())
   }
 
 }

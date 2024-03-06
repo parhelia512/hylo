@@ -55,7 +55,7 @@ public type PointerToMutable<Pointee>: Regular {
   /// - Requires: the `MemoryLayout<Pointee>.size()` bytes starting at the address are uninitialized
   ///   and suitably aligned for `Pointee`.
   public fun unsafe_initialize_pointee<E, R>(_ initialize: inout [E](set Pointee) -> R) -> R {
-    initialize(base as* (remote set Pointee))
+    initialize(&(base as* (remote set Pointee)))
   }
 
 }
@@ -82,6 +82,20 @@ public conformance PointerToMutable: Equatable {
   /// Returns `false` iff `other` has an equivalent value.
   public fun infix!= (_ other: Self) -> Bool {
     Bool(value: Builtin.icmp_ne_ptr(base, other.base))
+  }
+
+}
+
+public conformance PointerToMutable: ForeignConvertible {
+
+  public typealias ForeignRepresentation = Builtin.ptr
+
+  public init(foreign_value: sink Builtin.ptr) {
+    &self.base = foreign_value
+  }
+
+  public fun foreign_value() -> Builtin.ptr {
+    base
   }
 
 }

@@ -19,11 +19,10 @@ struct EqualityConstraint: Constraint, Hashable {
     self.origin = origin
   }
 
-  /// Creates an instance transforming by `constraint`.
-  init(_ constraint: SubtypingConstraint) {
-    self.left = constraint.left
-    self.right = constraint.right
-    self.origin = constraint.origin
+  /// Inserts the type variables that occur free in `self` into `s`.
+  func collectOpenVariables(in s: inout Set<TypeVariable>) {
+    left.collectOpenVariables(in: &s)
+    right.collectOpenVariables(in: &s)
   }
 
   mutating func modifyTypes(_ transform: (AnyType) -> AnyType) {

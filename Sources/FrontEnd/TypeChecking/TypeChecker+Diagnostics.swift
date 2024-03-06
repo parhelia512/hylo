@@ -6,6 +6,14 @@ extension Diagnostic {
     .error("ambiguous disjunction", at: site)
   }
 
+  static func error(autoclosureExpectsEmptyEnvironment site: SourceRange, given: AnyType)
+    -> Diagnostic
+  {
+    .error(
+      "autoclosure parameter expects arrow type with no parameters (given type: \(given))",
+      at: site)
+  }
+
   static func error(
     binding a: BindingPattern.Introducer, requiresInitializerAt site: SourceRange
   ) -> Diagnostic {
@@ -85,12 +93,6 @@ extension Diagnostic {
     type l: AnyType, incompatibleWith r: AnyType, at site: SourceRange
   ) -> Diagnostic {
     .error("incompatible types '\(l)' and '\(r)'", at: site)
-  }
-
-  static func error(invalidUseOfAssociatedType name: String, at site: SourceRange) -> Diagnostic {
-    .error(
-      "associated type '\(name)' can only be used with a concrete type or generic type parameter",
-      at: site)
   }
 
   static func error(invalidDestructuringOfType type: AnyType, at site: SourceRange) -> Diagnostic {
@@ -185,7 +187,7 @@ extension Diagnostic {
   static func note(
     trait x: TraitType, requiresAssociatedType n: String, at site: SourceRange
   ) -> Diagnostic {
-    return .note("trait '\(x)' requires associaed type '\(n)'", at: site)
+    return .note("trait '\(x)' requires associated type '\(n)'", at: site)
   }
 
   static func error(undefinedOperator name: String, at site: SourceRange) -> Diagnostic {
@@ -209,6 +211,12 @@ extension Diagnostic {
         (found \(found), expected \(expected))
         """, at: entity.site)
     }
+  }
+
+  static func error(
+    invalidBufferTypeArgumentCount found: Int, at site: SourceRange
+  ) -> Diagnostic {
+    .error("buffer type requires exactly one generic argument (found \(found))", at: site)
   }
 
   static func error(
@@ -310,10 +318,6 @@ extension Diagnostic {
     .error("cannot extend type '\(t)'", at: site)
   }
 
-  static func error(mutatingBundleMustReturnTupleAt site: SourceRange) -> Diagnostic {
-    .error("mutating bundle must return '{self: Self, _}'", at: site)
-  }
-
   static func error(
     cannotPass t: AnyType, toParameter u: AnyType, at site: SourceRange
   ) -> Diagnostic {
@@ -348,6 +352,16 @@ extension Diagnostic {
       return .error(
         "non-consuming for loop requires '\(m)' to conform to 'Collection' or 'Iterator'", at: site)
     }
+  }
+
+  static func error(
+    invalidReferenceToAssociatedType a: AssociatedTypeDecl.ID, at site: SourceRange, in ast: AST
+  ) -> Diagnostic {
+    .error(
+      """
+      associated type '\(ast[a].baseName)' can only be referred to with a concrete type or \
+      generic parameter base
+      """, at: site)
   }
 
   static func warning(needlessImport d: ImportDecl.ID, in ast: AST) -> Diagnostic {

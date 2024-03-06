@@ -74,6 +74,8 @@ public enum ManglingOperator: String {
 
   case traitType = "cT"
 
+  case bufferType = "dT"
+
   case existentialTraitType = "eT"
 
   case existentialGenericType = "egT"
@@ -84,7 +86,7 @@ public enum ManglingOperator: String {
 
   case methodType = "hT"
 
-  case lambdaType = "lT"
+  case arrowType = "lT"
 
   case metatypeType = "mT"
 

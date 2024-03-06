@@ -28,6 +28,8 @@ extension Module {
           pc = interpret(addressToPointer: user, in: &context)
         case is AdvancedByBytes:
           pc = interpret(advancedByBytes: user, in: &context)
+        case is AdvancedByStrides:
+          pc = interpret(advancedByStrides: user, in: &context)
         case is AllocStack:
           pc = interpret(allocStack: user, in: &context)
         case is Branch:
@@ -54,6 +56,8 @@ extension Module {
           pc = interpret(endProject: user, in: &context)
         case is EndProjectWitness:
           pc = interpret(endProjectWitness: user, in: &context)
+        case is GenericParameter:
+          pc = interpret(genericParameter: user, in: &context)
         case is GlobalAddr:
           pc = interpret(globalAddr: user, in: &context)
         case is LLVMInstruction:
@@ -62,6 +66,8 @@ extension Module {
           pc = interpret(load: user, in: &context)
         case is MarkState:
           pc = interpret(markState: user, in: &context)
+        case is MemoryCopy:
+          pc = interpret(memoryCopy: user, in: &context)
         case is Move:
           pc = interpret(move: user, in: &context)
         case is OpenCapture:
@@ -143,16 +149,10 @@ extension Module {
 
     /// Interprets `i` in `context`, reporting violations into `diagnostics`.
     func interpret(allocStack i: InstructionID, in context: inout Context) -> PC? {
-      // Create an abstract location denoting the newly allocated memory.
+      // A stack leak may occur if this instruction is in a loop.
       let l = AbstractLocation.root(.register(i))
       precondition(context.memory[l] == nil, "stack leak")
-
-      // Update the context.
-      let s = self[i] as! AllocStack
-      let t = AbstractTypeLayout(of: s.allocatedType, definedIn: program)
-
-      context.memory[l] = .init(layout: t, value: .full(.uninitialized))
-      context.locals[.register(i)] = .locations([l])
+      context.declareStorage(assignedTo: i, in: self, initially: .uninitialized)
       return successor(of: i)
     }
 
@@ -166,10 +166,27 @@ extension Module {
     }
 
     /// Interprets `i` in `context`, reporting violations into `diagnostics`.
+    func interpret(advancedByStrides i: InstructionID, in context: inout Context) -> PC? {
+      let s = self[i] as! AdvancedByStrides
+
+      // Operand must a location.
+      let locations: [AbstractLocation]
+      if case .constant = s.base {
+        // Operand is a constant.
+        UNIMPLEMENTED()
+      } else {
+        locations = context.locals[s.base]!.unwrapLocations()!.map({ $0.appending([s.offset]) })
+      }
+
+      context.locals[.register(i)] = .locations(Set(locations))
+      return successor(of: i)
+    }
+
+    /// Interprets `i` in `context`, reporting violations into `diagnostics`.
     func interpret(call i: InstructionID, in context: inout Context) -> PC? {
       let s = self[i] as! Call
       let f = s.callee
-      let callee = LambdaType(type(of: f).ast)!
+      let callee = ArrowType(type(of: f).ast)!
 
       // Evaluate the callee.
 
@@ -319,13 +336,14 @@ extension Module {
     }
 
     /// Interprets `i` in `context`, reporting violations into `diagnostics`.
+    func interpret(genericParameter i: InstructionID, in context: inout Context) -> PC? {
+      context.declareStorage(assignedTo: i, in: self, initially: .initialized)
+      return successor(of: i)
+    }
+
+    /// Interprets `i` in `context`, reporting violations into `diagnostics`.
     func interpret(globalAddr i: InstructionID, in context: inout Context) -> PC? {
-      let l = AbstractLocation.root(.register(i))
-      context.memory[l] = .init(
-        layout: AbstractTypeLayout(
-          of: (self[i] as! GlobalAddr).valueType, definedIn: program),
-        value: .full(.initialized))
-      context.locals[.register(i)] = .locations([l])
+      context.declareStorage(assignedTo: i, in: self, initially: .initialized)
       return successor(of: i)
     }
 
@@ -348,13 +366,25 @@ extension Module {
     func interpret(markState i: InstructionID, in context: inout Context) -> PC? {
       let s = self[i] as! MarkState
 
-      let locations = context.locals[s.storage]!.unwrapLocations()!
-      for l in locations {
-        context.withObject(at: l) { (o) in
-          o.value = .full(s.initialized ? .initialized : .uninitialized)
+      // Built-in values are never consumed.
+      let isBuiltin = type(of: s.storage).ast.isBuiltin
+
+      context.forEachObject(at: s.storage) { (o) in
+        if s.initialized {
+          o.value = .full(.initialized)
+        } else if !isBuiltin {
+          // `mark_state` is treated as a consumer so that we can detect and diagnose escapes.
+          o.value = .full(.consumed(by: [i]))
         }
       }
 
+      return successor(of: i)
+    }
+
+    /// Interprets `i` in `context`, reporting violations into `diagnostics`.
+    func interpret(memoryCopy i: InstructionID, in context: inout Context) -> PC? {
+      let s = self[i] as! MemoryCopy
+      initialize(s.target, in: &context)
       return successor(of: i)
     }
 
@@ -431,9 +461,7 @@ extension Module {
 
       // Make sure that the return value is initialized on exit.
       if !self[f].isSubscript {
-        ensureInitializedOnExit(
-          .parameter(entry, self[f].inputs.count), passed: .set, in: &context,
-          reportingDiagnosticsAt: .empty(at: self[f].site.first()))
+        ensureReturnValueIsInitialized(in: &context, at: self[i].site)
       }
 
       return successor(of: i)
@@ -541,26 +569,28 @@ extension Module {
       context.withObject(at: .root(p)) { (o) in
         if o.value == .full(.initialized) { return }
 
-        if k == .set {
-          // If the parameter is a return value (index == 0) we emit specialized diagnostics.
-          if case .parameter(_, 0) = p {
-            let t = self[f].output
-            if !t.isVoidOrNever {
-              diagnostics.insert(
-                .missingFunctionReturn(expectedReturnType: t, at: site)
-              )
-              return
-            }
-          }
-          diagnostics.insert(
-            .uninitializedSetParameter(beforeReturningFrom: f, in: self, at: site))
-          return
-        }
-
         // If the parameter is `let` or `inout`, it's been (partially) consumed since it was
         // initialized in the entry context.
-        diagnostics.insert(
-          .illegalParameterEscape(consumedBy: o.value.consumers, in: self, at: site))
+        if k == .set {
+          diagnostics.insert(
+            .uninitializedSetParameter(beforeReturningFrom: f, in: self, at: site))
+        } else {
+          diagnostics.insert(
+            .illegalParameterEscape(consumedBy: o.value.consumers, in: self, at: site))
+        }
+      }
+    }
+
+    /// Checks that the return value is initialized in `context`.
+    func ensureReturnValueIsInitialized(
+      in context: inout Context, at site: SourceRange
+    ) {
+      let p = returnValue(of: f)!
+      let isInitialized = context.withObject(at: .root(p)) { (o) in
+        o.value == .full(.initialized)
+      }
+      if !isInitialized {
+        diagnostics.insert(.missingReturn(inFunctionReturning: self[f].output, at: site))
       }
     }
 
@@ -591,11 +621,13 @@ extension Module {
 
       switch access {
       case .let, .inout:
+        assert(projection.value == .full(.initialized) || !projection.value.consumers.isEmpty)
         for c in projection.value.consumers {
           diagnostics.insert(.error(cannotConsume: access, at: self[c].site))
         }
 
       case .set:
+        assert(projection.value == .full(.initialized) || !projection.value.consumers.isEmpty)
         for c in projection.value.consumers {
           diagnostics.insert(.error(cannotConsume: access, at: self[c].site))
         }
@@ -686,7 +718,7 @@ extension Module {
   }
 
   /// Inserts IR for the deinitialization of `root` at given `initializedSubfields` before
-  /// instruction `i`, anchoring instructions to `site`
+  /// instruction `i`, anchoring instructions to `site`.
   private mutating func insertDeinit(
     _ root: Operand, at initializedSubfields: [RecordPath], anchoredTo site: SourceRange,
     before i: InstructionID, reportingDiagnosticsTo log: inout DiagnosticSet
@@ -702,7 +734,7 @@ extension Module {
 
   /// Returns the site at which diagnostics related to the parameter `p` should be reported in `f`.
   private func diagnosticSite(for p: Parameter, in f: Function.ID) -> SourceRange {
-    guard let d = p.decl else { return .empty(at: self[f].site.first()) }
+    guard let d = p.decl else { return .empty(at: self[f].site.start) }
     switch d.kind {
     case ParameterDecl.self:
       return program.ast[ParameterDecl.ID(d)!].identifier.site
@@ -1009,8 +1041,8 @@ extension Diagnostic {
     .error("use of uninitialized object", at: site)
   }
 
-  fileprivate static func missingFunctionReturn(
-    expectedReturnType: AnyType,
+  fileprivate static func missingReturn(
+    inFunctionReturning expectedReturnType: AnyType,
     at site: SourceRange
   ) -> Diagnostic {
     .error("missing return in function expected to return '\(expectedReturnType)'", at: site)

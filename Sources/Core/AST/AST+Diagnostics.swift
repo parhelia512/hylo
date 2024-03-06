@@ -52,7 +52,7 @@ extension Diagnostic {
   }
 
   static func error<T: Decl>(unexpected d: T.ID, in ast: AST) -> Diagnostic {
-    .error("\(T.constructDescription) is not allowed here", at: .empty(at: ast[d].site.first()))
+    .error("\(T.constructDescription) is not allowed here", at: .empty(at: ast[d].site.start))
   }
 
   public static func error(unexpectedCapture p: BindingPattern) -> Diagnostic {
@@ -63,6 +63,10 @@ extension Diagnostic {
     .error(
       "memberwise initializer declaration may only appear in product type declaration",
       at: d.introducer.site)
+  }
+
+  static func error(unexpectedAttribute a: Attribute, at site: SourceRange) -> Diagnostic {
+    .error("unexpected attribute '\(a.name.value)'", at: site)
   }
 
   public static func error(

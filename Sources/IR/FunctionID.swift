@@ -27,7 +27,7 @@ extension Function {
     public let value: Value
 
     /// Creates the identity of the lowered form of `d`, which is the declaration of a function,
-    /// initializer, method implementation, or subscript implementation.s
+    /// initializer, method implementation, or subscript implementation.
     init<T: DeclID>(_ d: T) {
       switch d.kind {
       case FunctionDecl.self, InitializerDecl.self, MethodImpl.self, SubscriptImpl.self:
@@ -53,6 +53,15 @@ extension Function {
     public init(monomorphized base: Function.ID, for arguments: GenericArguments) {
       precondition(!arguments.isEmpty)
       self.value = .monomorphized(base: base, arguments: arguments)
+    }
+
+    /// `true` if `self` is the identity of a synthesized function.
+    public var isSynthesized: Bool {
+      if case .synthesized = value {
+        return true
+      } else {
+        return false
+      }
     }
 
     /// `true` if `self` is the identity of a monomorphized function.

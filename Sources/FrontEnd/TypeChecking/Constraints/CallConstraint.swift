@@ -29,8 +29,14 @@ struct CallConstraint: Constraint, Hashable {
   /// The expected output type of `callee`.
   private(set) var output: AnyType
 
+  /// The call associated with this constraint.
+  let call: CallID
+
   /// `true` if `callee` is expected to be an arrow; `false` if it's expected to be a subscript.
   let isArrow: Bool
+
+  /// `true` if `callee` is marked for mutation.
+  let isMutating: Bool
 
   let origin: ConstraintOrigin
 
@@ -38,14 +44,18 @@ struct CallConstraint: Constraint, Hashable {
   /// `arguments` and returns `output`.
   init(
     arrow callee: AnyType,
+    usedMutably isMutating: Bool,
     takes arguments: [Argument],
     gives output: AnyType,
+    in call: CallID,
     origin: ConstraintOrigin
   ) {
     self.callee = callee
     self.arguments = arguments
     self.output = output
+    self.call = call
     self.isArrow = true
+    self.isMutating = isMutating
     self.origin = origin
   }
 
@@ -53,20 +63,33 @@ struct CallConstraint: Constraint, Hashable {
   /// `arguments` and returns `output`.
   init(
     subscript callee: AnyType,
+    usedMutably isMutating: Bool,
     takes arguments: [Argument],
     gives output: AnyType,
+    in call: CallID,
     origin: ConstraintOrigin
   ) {
     self.callee = callee
     self.arguments = arguments
     self.output = output
+    self.call = call
     self.isArrow = false
+    self.isMutating = isMutating
     self.origin = origin
   }
 
   /// The expected labels of `callee`.
   var labels: LazyMapSequence<[Argument], String?> {
     arguments.lazy.map(\.label?.value)
+  }
+
+  /// Inserts the type variables that occur free in `self` into `s`.
+  func collectOpenVariables(in s: inout Set<TypeVariable>) {
+    callee.collectOpenVariables(in: &s)
+    output.collectOpenVariables(in: &s)
+    for i in 0 ..< arguments.count {
+      arguments[i].type.collectOpenVariables(in: &s)
+    }
   }
 
   mutating func modifyTypes(_ transform: (AnyType) -> AnyType) {
@@ -82,10 +105,11 @@ struct CallConstraint: Constraint, Hashable {
 extension CallConstraint: CustomStringConvertible {
 
   var description: String {
+    let m = isMutating ? "&" : ""
     if isArrow {
-      return "(\(callee))(\(list: arguments)) -> \(output)"
+      return "\(m)(\(callee))(\(list: arguments)) -> \(output)"
     } else {
-      return "(\(callee))[\(list: arguments)]: \(output)"
+      return "\(m)(\(callee))[\(list: arguments)]: \(output)"
     }
   }
 

@@ -16,7 +16,7 @@ extension Module {
   }
 
   /// If `i` is `access` or `project`, make sure it is post-dominated by respectively `end_borrow`
-  /// or `end_project`, inserting new instructions as necessary. Otherwise, does nothing.
+  /// or `end_project`, inserting new instructions as necessary; does nothing otherwise.
   private mutating func close(
     _ i: InstructionID, in f: Function.ID, reportingDiagnosticsTo log: inout DiagnosticSet
   ) {
@@ -74,7 +74,7 @@ extension Module {
 
       case .start(let b):
         let site = instructions(in: b).first.map(default: self[i].site) {
-          SourceRange.empty(at: self[$0].site.first())
+          SourceRange.empty(at: self[$0].site.start)
         }
         let s = make(&self, site)
         insert(s, at: boundary)
@@ -140,6 +140,8 @@ private protocol LifetimeExtender {}
 extension Access: LifetimeExtender {}
 
 extension AdvancedByBytes: LifetimeExtender {}
+
+extension AdvancedByStrides: LifetimeExtender {}
 
 extension OpenCapture: LifetimeExtender {}
 

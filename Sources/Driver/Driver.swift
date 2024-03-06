@@ -10,6 +10,23 @@ import Utils
 
 public struct Driver: ParsableCommand {
 
+  /// A validation error that includes the command's full help message.
+  struct ValidationErrorWithHelp: Error, CustomStringConvertible {
+    var message: String
+
+    init(_ message: String) {
+      self.message = message
+    }
+
+    var description: String {
+      """
+      \(message)
+
+      \(Driver.helpMessage())
+      """
+    }
+  }
+
   /// The type of the output files to generate.
   private enum OutputType: String, ExpressibleByArgument {
 
@@ -45,14 +62,16 @@ public struct Driver: ParsableCommand {
   private var importBuiltinModule: Bool = false
 
   @Flag(
-    name: [.customLong("unhosted")],
-    help: "Load only the core library, omitting any definitions that depend on OS support.")
-  private var unhosted: Bool = false
+    name: [.customLong("freestanding")],
+    help:
+      "Import only the freestanding core of the standard library, omitting any definitions that depend on having an operating system."
+  )
+  private var freestanding: Bool = false
 
   @Flag(
-    name: [.customLong("sequential")],
-    help: "Execute the compilation pipeline sequentially.")
-  private var compileSequentially: Bool = false
+    name: [.customLong("experimental-parallel-typechecking")],
+    help: "Parallelize the type checker")
+  private var experimentalParallelTypeChecking: Bool = false
 
   @Flag(
     name: [.customLong("typecheck")],
@@ -90,7 +109,7 @@ public struct Driver: ParsableCommand {
   @Option(
     name: [.customShort("l")],
     help: ArgumentHelp(
-      "Link the generated crate(s) to the specified native library.",
+      "Link the generated module(s) to the specified native library.",
       valueName: "name"))
   private var libraries: [String] = []
 
@@ -106,13 +125,18 @@ public struct Driver: ParsableCommand {
   private var verbose: Bool = false
 
   @Flag(
+    name: [.customShort("V"), .long],
+    help: "Output the compiler version.")
+  private var version: Bool = false
+
+  @Flag(
     name: [.customShort("O")],
     help: "Compile with optimizations.")
   private var optimize: Bool = false
 
   @Argument(
     transform: URL.init(fileURLWithPath:))
-  private var inputs: [URL]
+  private var inputs: [URL] = []
 
   public init() {}
 
@@ -124,13 +148,11 @@ public struct Driver: ParsableCommand {
   public func run() throws {
     do {
       let (exitCode, diagnostics) = try execute()
-
       diagnostics.render(
         into: &standardError, style: ProcessInfo.ansiTerminalIsConnected ? .styled : .unstyled)
-
       Driver.exit(withError: exitCode)
     } catch let e {
-      print("Unexpected error\n\(e)")
+      print("Unexpected error\n")
       Driver.exit(withError: e)
     }
   }
@@ -144,6 +166,7 @@ public struct Driver: ParsableCommand {
       try executeCommand(diagnostics: &diagnostics)
     } catch let d as DiagnosticSet {
       assert(d.containsError, "Diagnostics containing no errors were thrown")
+      diagnostics.formUnion(d)
       return (ExitCode.failure, diagnostics)
     }
     return (ExitCode.success, diagnostics)
@@ -152,6 +175,15 @@ public struct Driver: ParsableCommand {
   /// Executes the command, accumulating diagnostics in `diagnostics`.
   private func executeCommand(diagnostics: inout DiagnosticSet) throws {
 
+    if version {
+      standardError.write("\(hcVersion)\n")
+      return
+    }
+
+    guard !inputs.isEmpty else {
+      throw ValidationErrorWithHelp("Missing expected argument '<inputs> ...'")
+    }
+
     if compileInputAsModules {
       fatalError("compilation as modules not yet implemented.")
     }
@@ -159,7 +191,7 @@ public struct Driver: ParsableCommand {
     let productName = makeProductName(inputs)
 
     /// An instance that includes just the standard library.
-    var ast = AST(libraryRoot: unhosted ? coreLibrarySourceRoot : standardLibrarySourceRoot)
+    var ast = try (freestanding ? Host.freestandingLibraryAST : Host.hostedLibraryAST).get()
 
     // The module whose Hylo files were given on the command-line
     let sourceModule = try ast.makeModule(
@@ -172,7 +204,7 @@ public struct Driver: ParsableCommand {
     }
 
     let program = try TypedProgram(
-      annotating: ScopedProgram(ast), inParallel: !compileSequentially,
+      annotating: ScopedProgram(ast), inParallel: experimentalParallelTypeChecking,
       reportingDiagnosticsTo: &diagnostics,
       tracingInferenceIf: shouldTraceInference)
     if typeCheckOnly { return }
@@ -192,7 +224,7 @@ public struct Driver: ParsableCommand {
     if verbose {
       standardError.write("begin depolymorphization pass.\n")
     }
-    ir.applyPass(.depolymorphize)
+    ir.depolymorphize()
 
     if verbose {
       standardError.write("create LLVM target machine.\n")
@@ -264,7 +296,7 @@ public struct Driver: ParsableCommand {
   /// Returns `true` if type inference related to `n`, which is in `p`, would be traced.
   private func shouldTraceInference(_ n: AnyNodeID, _ p: TypedProgram) -> Bool {
     if let s = inferenceTracingSite {
-      return s.bounds.contains(p[n].site.first())
+      return s.bounds.contains(p[n].site.start)
     } else {
       return false
     }
@@ -363,14 +395,14 @@ public struct Driver: ParsableCommand {
   /// as a default name if `outputURL` is `nil`.
   private func executableOutputPath(default productName: String) -> String {
     var binaryPath = outputURL?.path ?? URL(fileURLWithPath: productName).fileSystemPath
-    if !binaryPath.hasSuffix(HostPlatform.executableSuffix) {
-      binaryPath += HostPlatform.executableSuffix
+    if !binaryPath.hasSuffix(Host.executableSuffix) {
+      binaryPath += Host.executableSuffix
     }
     return binaryPath
   }
 
   /// If `inputs` contains a single URL `u` whose path is non-empty, returns the last component of
-  /// `u` without any path extension and stripping all leading dots. Otherwise, returns "Main".
+  /// `u` without any path extension and stripping all leading dots; returns "Main" otherwise.
   private func makeProductName(_ inputs: [URL]) -> String {
     if let u = inputs.uniqueElement {
       let n = u.deletingPathExtension().lastPathComponent.drop(while: { $0 == "." })
@@ -394,28 +426,19 @@ public struct Driver: ParsableCommand {
     UNIMPLEMENTED()
   }
 
-  /// Returns the path of the executable that is invoked at the command-line with the name given by
-  /// `invocationName`.
+  /// Returns the path of the binary executable that is invoked at the command-line with the name
+  /// given by `invocationName`.
   private func findExecutable(invokedAs invocationName: String) throws -> URL {
     if let cached = Driver.executableLocationCache[invocationName] { return cached }
 
     let executableFileName =
-      invocationName.hasSuffix(executableSuffix)
-      ? invocationName : invocationName + executableSuffix
-
-    // Search in the current working directory.
-    var candidate = currentDirectory.appendingPathComponent(executableFileName)
-    if FileManager.default.fileExists(atPath: candidate.fileSystemPath) {
-      Driver.executableLocationCache[invocationName] = candidate
-      return candidate
-    }
+      invocationName.hasSuffix(Host.executableSuffix)
+      ? invocationName : invocationName + Host.executableSuffix
 
     // Search in the PATH.
-    let environment =
-      ProcessInfo.processInfo.environment[HostPlatform.pathEnvironmentVariable] ?? ""
-    for root in environment.split(separator: HostPlatform.pathEnvironmentSeparator) {
-      candidate = URL(fileURLWithPath: String(root)).appendingPathComponent(
-        invocationName + HostPlatform.executableSuffix)
+    let path = ProcessInfo.processInfo.environment[Host.pathEnvironmentVariable] ?? ""
+    for root in path.split(separator: Host.pathEnvironmentSeparator) {
+      let candidate = URL(fileURLWithPath: String(root)).appendingPathComponent(executableFileName)
       if FileManager.default.fileExists(atPath: candidate.fileSystemPath) {
         Driver.executableLocationCache[invocationName] = candidate
         return candidate

@@ -1,3 +1,4 @@
+import OrderedCollections
 import Utils
 
 /// A box wrapping a type.
@@ -20,6 +21,7 @@ private protocol TypeBox {
   func transformParts<M>(
     mutating m: inout M, _ transformer: (inout M, AnyType) -> TypeTransformAction
   ) -> any TypeProtocol
+
 }
 
 /// A box wrapping an instance of `Base`.
@@ -50,10 +52,11 @@ private struct ConcreteTypeBox<Base: TypeProtocol>: TypeBox {
   ) -> any TypeProtocol {
     base.transformParts(mutating: &m, transformer)
   }
+
 }
 
 /// The (static) type of an entity.
-public struct AnyType: TypeProtocol {
+public struct AnyType {
 
   /// Hylo's `Any` type.
   public static let any = ^ExistentialType(traits: [], constraints: [])
@@ -100,7 +103,7 @@ public struct AnyType: TypeProtocol {
 
   /// `self` transformed as the type of a member of `receiver`, which is existential.
   public func asMember(of receiver: ExistentialType) -> AnyType {
-    let m = LambdaType(self) ?? UNIMPLEMENTED()
+    let m = ArrowType(self) ?? UNIMPLEMENTED()
     return ^m.asMember(of: receiver)
   }
 
@@ -123,7 +126,7 @@ public struct AnyType: TypeProtocol {
     switch base {
     case let t as BoundGenericType:
       return t.base.isLeaf
-    case is ExistentialType, is LambdaType, is TypeVariable:
+    case is ExistentialType, is ArrowType, is TypeVariable:
       return false
     case let t as TypeAliasType:
       return t.resolved.isLeaf
@@ -159,6 +162,18 @@ public struct AnyType: TypeProtocol {
     }
   }
 
+  /// `true` iff `self` is a built-in type or tuple thereof.
+  ///
+  /// - Requires: `self` is canonical.
+  public var isBuiltinOrRawTuple: Bool {
+    precondition(self[.isCanonical])
+    if let b = TupleType(self) {
+      return b.elements.allSatisfy(\.type.isBuiltin)
+    } else {
+      return base is BuiltinType
+    }
+  }
+
   /// Indicates whether `self` is Hylo's `Void` or `Never` type.
   ///
   /// - Requires: `self` is canonical.
@@ -172,10 +187,24 @@ public struct AnyType: TypeProtocol {
     (base is AssociatedTypeType) || (base is GenericTypeParameterType)
   }
 
+  /// Returns `true` iff `self` is bound to an existential quantifier.
+  public var isSkolem: Bool {
+    switch base {
+    case let u as AssociatedTypeType:
+      return u.domain.isSkolem
+    case is GenericTypeParameterType:
+      return true
+    case let u as ConformanceLensType:
+      return u.subject.isSkolem
+    default:
+      return false
+    }
+  }
+
   /// Indicates whether `self` has a record layout.
   public var hasRecordLayout: Bool {
     switch base {
-    case is LambdaType, is ProductType, is TupleType:
+    case is BufferType, is ArrowType, is ProductType, is TupleType:
       return true
     case let type as BoundGenericType:
       return type.base.hasRecordLayout
@@ -184,18 +213,10 @@ public struct AnyType: TypeProtocol {
     }
   }
 
-  public var flags: TypeFlags { base.flags }
-
-  public func transformParts<M>(
-    mutating m: inout M, _ transformer: (inout M, AnyType) -> TypeTransformAction
-  ) -> AnyType {
-    AnyType(wrapped.transformParts(mutating: &m, transformer))
-  }
-
   /// Returns `self` with occurrences of free type variables replaced by errors.
   public var replacingVariablesWithErrors: AnyType {
     self.transform { (t) in
-      if t.isTypeVariable {
+      if t.base is TypeVariable {
         return .stepOver(.error)
       } else if t[.hasVariable] {
         return .stepInto(t)
@@ -205,11 +226,145 @@ public struct AnyType: TypeProtocol {
     }
   }
 
+  /// Inserts the type variables that occur free in `self` into `s`.
+  public func collectOpenVariables(in s: inout Set<TypeVariable>) {
+    _ = self.transform(mutating: &s) { (partialResult, t) in
+      if let v = TypeVariable(t) {
+        partialResult.insert(v)
+        return .stepOver(t)
+      } else if t[.hasVariable] {
+        return .stepInto(t)
+      } else {
+        return .stepOver(t)
+      }
+    }
+  }
+
+  /// Returns the generic parameters occurring free in `self`.
+  public var skolems: OrderedSet<GenericParameterDecl.ID> {
+    var r = OrderedSet<GenericParameterDecl.ID>()
+    collectGenericTypeParameters(in: &r, ignoring: [])
+    return r
+  }
+
+  /// Inserts generic parameters occurring free in `self` into `open`, unless they're in `bound`.
+  private func collectGenericTypeParameters(
+    in open: inout OrderedSet<GenericParameterDecl.ID>,
+    ignoring bound: Set<GenericParameterDecl.ID>
+  ) {
+    var state = (bound: bound, open: open)
+    defer { open = state.open }
+
+    _ = self.transform(mutating: &state) { (s, t) in
+      switch t.base {
+      case let u as BoundGenericType:
+        var b = s.bound
+        for (k, v) in u.arguments {
+          b.insert(k)
+          if let g = GenericTypeParameterType(v.asType), g.decl == k {
+            if !s.bound.contains(k) { s.open.append(k) }
+          }
+        }
+        for a in u.arguments.values {
+          a.asType?.collectGenericTypeParameters(in: &s.open, ignoring: b)
+        }
+        return .stepOver(t)
+
+      case let u as GenericTypeParameterType:
+        if !s.bound.contains(u.decl) { s.open.append(u.decl) }
+        return .stepOver(t)
+
+      default:
+        return t[.hasGenericTypeParameter] ? .stepInto(t) : .stepOver(t)
+      }
+    }
+  }
+
+  /// Returns `true` if `self` matches `other`, calling `unify` on `unifier` to attempt unifying
+  /// syntactically different parts.
+  ///
+  /// The method visits `self` and `other` are visited "side-by-side", calling `unify` on inequal
+  /// pairs of non-structural type terms. `unify` returns `true` if these terms can be "unified",
+  /// i.e., considered equivalent under some substitution.
+  public func matches<U>(
+    _ other: AnyType, mutating unifier: inout U,
+    _ unify: (inout U, _ lhs: AnyType, _ rhs: AnyType) -> Bool
+  ) -> Bool {
+    switch (self.base, other.base) {
+    case (let lhs as BoundGenericType, let rhs as BoundGenericType):
+      if lhs.arguments.count != rhs.arguments.count { return false }
+
+      var result = lhs.base.matches(rhs.base, mutating: &unifier, unify)
+      for (a, b) in zip(lhs.arguments, rhs.arguments) {
+        switch (a.value, b.value) {
+        case (.type(let vl), .type(let vr)):
+          result = vl.matches(vr, mutating: &unifier, unify) && result
+        default:
+          result = a.value == b.value && result
+        }
+      }
+      return result
+
+    case (let lhs as MetatypeType, let rhs as MetatypeType):
+      return lhs.instance.matches(rhs.instance, mutating: &unifier, unify)
+
+    case (let lhs as TupleType, let rhs as TupleType):
+      if !lhs.labels.elementsEqual(rhs.labels) { return false }
+
+      var result = true
+      for (a, b) in zip(lhs.elements, rhs.elements) {
+        result = a.type.matches(b.type, mutating: &unifier, unify) && result
+      }
+      return result
+
+    case (let lhs as ArrowType, let rhs as ArrowType):
+      if !lhs.labels.elementsEqual(rhs.labels) { return false }
+
+      var result = true
+      for (a, b) in zip(lhs.inputs, rhs.inputs) {
+        result = a.type.matches(b.type, mutating: &unifier, unify) && result
+      }
+      result = lhs.output.matches(rhs.output, mutating: &unifier, unify) && result
+      result = lhs.environment.matches(rhs.environment, mutating: &unifier, unify) && result
+      return result
+
+    case (let lhs as MethodType, let rhs as MethodType):
+      if !lhs.labels.elementsEqual(rhs.labels) || (lhs.capabilities != rhs.capabilities) {
+        return false
+      }
+
+      var result = true
+      for (a, b) in zip(lhs.inputs, rhs.inputs) {
+        result = a.type.matches(b.type, mutating: &unifier, unify) && result
+      }
+      result = lhs.output.matches(rhs.output, mutating: &unifier, unify) && result
+      result = lhs.receiver.matches(rhs.receiver, mutating: &unifier, unify) && result
+      return result
+
+    case (let lhs as ParameterType, let rhs as ParameterType):
+      if lhs.access != rhs.access { return false }
+      return lhs.bareType.matches(rhs.bareType, mutating: &unifier, unify)
+
+    case (let lhs as RemoteType, let rhs as RemoteType):
+      if lhs.access != rhs.access { return false }
+      return lhs.bareType.matches(rhs.bareType, mutating: &unifier, unify)
+
+    default:
+      return (self == other) || unify(&unifier, self, other)
+    }
+  }
+
 }
 
-extension AnyType: CompileTimeValue {
+extension AnyType: TypeProtocol {
 
-  public var staticType: AnyType { ^MetatypeType(of: self) }
+  public var flags: TypeFlags { base.flags }
+
+  public func transformParts<M>(
+    mutating m: inout M, _ transformer: (inout M, AnyType) -> TypeTransformAction
+  ) -> AnyType {
+    AnyType(wrapped.transformParts(mutating: &m, transformer))
+  }
 
 }
 

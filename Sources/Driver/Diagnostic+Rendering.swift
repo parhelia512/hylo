@@ -47,15 +47,16 @@ extension Diagnostic {
   /// Writes the text of the source line and column indicator (the "window") into `output`.
   private func renderWindow<Output: TextOutputStream>(into output: inout Output) {
     // Write the first marked line followed by a newline.
-    let firstMarkedLine = site.file.line(containing: site.start).text
+    let firstMarkedLine = site.file.line(containing: site.startIndex).text
     output.write(String(firstMarkedLine))
     if !(firstMarkedLine.last?.isNewline ?? false) { output.write("\n") }
 
     // Write the column indication for that line, followed by a newline.
-    let startColumn = firstMarkedLine.distance(from: firstMarkedLine.startIndex, to: site.start)
+    let startColumn = firstMarkedLine.distance(
+      from: firstMarkedLine.startIndex, to: site.startIndex)
     output.write(String(repeating: " ", count: startColumn))
     let markWidth = firstMarkedLine.distance(
-      from: site.start, to: min(site.end, firstMarkedLine.endIndex))
+      from: site.startIndex, to: min(site.endIndex, firstMarkedLine.endIndex))
     output.write(markWidth <= 1 ? "^" : String(repeating: "~", count: markWidth))
     output.write("\n")
   }
@@ -134,7 +135,7 @@ private enum ANSISGR: Int {
   case white = 37
   case defaultColor = 39
 
-  /// The textual representation of this code that has an effect on an ANSI terminal
+  /// The textual representation of this code that has an effect on an ANSI terminal.
   var controlString: String {
     "\u{001B}[\(rawValue)m"
   }
@@ -145,7 +146,7 @@ extension String {
   /// A string transformation for applying (or not) ANSI terminal styling.
   fileprivate typealias ANSIStyle = (String) -> String
 
-  /// Returns `self` with the given set of styles applied
+  /// Returns `self` with the given set of styles applied.
   fileprivate func styled(_ rendition: ANSISGR...) -> String {
     "\(list: rendition.map(\.controlString), joinedBy: "")"
       + "\(self)\(ANSISGR.reset.controlString)"

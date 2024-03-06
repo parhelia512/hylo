@@ -17,16 +17,31 @@ public struct AST {
     /// - Invariant: All referred modules have a different name.
     public var modules: [ModuleDecl.ID] = []
 
+    /// The traits in Hylo's standard library that are known by the compiler.
+    var coreTraits: CoreTraits?
+
     /// The module containing Hylo's core library, if any.
     public var coreLibrary: ModuleDecl.ID?
+
+    /// Conditions for selecting conditional compilation branches.
+    public let compilationConditions: ConditionalCompilationFactors
+
+    /// Creates an empty instance, using `compilationConditions` as conditions for selecting conditional compilation branches.
+    public init(_ compilationConditions: ConditionalCompilationFactors) {
+      self.compilationConditions = compilationConditions
+    }
 
   }
 
   /// The notional stored properties of `self`; distinguished for encoding/decoding purposes.
-  private var storage = Storage()
+  private var storage: Storage
 
   /// The traits in Hylo's standard library that are known by the compiler.
-  public var coreTraits: CoreTraits?
+  public var coreTraits: CoreTraits? {
+    get { storage.coreTraits }
+    set { storage.coreTraits = newValue }
+    _modify { yield &storage.coreTraits }
+  }
 
   /// The nodes in `self`.
   private var nodes: [AnyNode] {
@@ -50,8 +65,17 @@ public struct AST {
     set { storage.coreLibrary = newValue }
   }
 
-  /// Creates an empty AST.
-  public init() {}
+  /// The expansion filter used while processing conditional compilation statements in `self`.
+  public var compilationConditions: ConditionalCompilationFactors {
+    return storage.compilationConditions
+  }
+
+  /// Creates an empty AST, using using `compilationConditions` as conditions for selecting conditional compilation branches.
+  public init(
+    _ compilationConditions: ConditionalCompilationFactors = ConditionalCompilationFactors()
+  ) {
+    self.storage = Storage(compilationConditions)
+  }
 
   /// Inserts `n` into `self`, updating `diagnostics` if `n` is ill-formed.
   public mutating func insert<T: Node>(_ n: T, diagnostics: inout DiagnosticSet) -> T.ID {
@@ -113,18 +137,18 @@ public struct AST {
   // MARK: Core library
 
   /// Indicates whether the Core library has been loaded.
-  public var isCoreModuleLoaded: Bool { coreLibrary != nil }
+  public var coreModuleIsLoaded: Bool { coreLibrary != nil }
 
   /// Returns the type named `name` defined in the core library or `nil` it does not exist.
   ///
   /// - Requires: The Core library must have been loaded.
   public func coreType(_ name: String) -> ProductType? {
-    precondition(isCoreModuleLoaded, "Core library is not loaded")
+    precondition(coreModuleIsLoaded, "Core library is not loaded")
 
-    for id in topLevelDecls(coreLibrary!) where id.kind == ProductTypeDecl.self {
-      let id = ProductTypeDecl.ID(id)!
-      if self[id].baseName == name {
-        return ProductType(id, ast: self)
+    for d in topLevelDecls(coreLibrary!) where d.kind == ProductTypeDecl.self {
+      let d = ProductTypeDecl.ID(d)!
+      if self[d].baseName == name {
+        return ProductType(d, ast: self)
       }
     }
 
@@ -135,7 +159,7 @@ public struct AST {
   ///
   /// - Requires: The Core library must have been loaded.
   public func coreTrait(_ name: String) -> TraitType? {
-    precondition(isCoreModuleLoaded, "Core library is not loaded")
+    precondition(coreModuleIsLoaded, "Core library is not loaded")
 
     for id in topLevelDecls(coreLibrary!) where id.kind == TraitDecl.self {
       let id = TraitDecl.ID(id)!
@@ -169,8 +193,8 @@ public struct AST {
     modules.first(where: { self[$0].baseName == n })
   }
 
-  /// Returns the IDs of the top-level declarations in the lexical scope of `module`.
-  public func topLevelDecls(_ module: ModuleDecl.ID) -> some Collection<AnyDeclID> {
+  /// Returns the top-level declarations in the lexical scope of `module`.
+  private func topLevelDecls(_ module: ModuleDecl.ID) -> some Collection<AnyDeclID> {
     self[self[module].sources].map(\.decls).joined()
   }
 
@@ -226,60 +250,53 @@ public struct AST {
     })
   }
 
-  /// Returns the kind identifying synthesized declarations of `requirement`, which is defined by
-  /// `concept`, or `nil` if `requirement` is not synthesizable.
-  ///
-  /// - Requires: `requirement` must be a requirement of `concept`.
-  public func synthesizedKind<T: DeclID>(
-    of requirement: T, definedBy concept: TraitType
-  ) -> SynthesizedFunctionDecl.Kind? {
+  /// Returns the kind identifying synthesized declarations of `requirement`, or `nil` if
+  /// `requirement` is not synthesizable.
+  public func synthesizedKind<T: DeclID>(of requirement: T) -> SynthesizedFunctionDecl.Kind? {
     // If the requirement is defined in `Deinitializable`, it must be the deinitialization method.
-    if concept == core.deinitializable.type {
-      assert(requirement.kind == FunctionDecl.self)
+    switch requirement.rawValue {
+    case core.deinitializable.deinitialize.rawValue:
       return .deinitialize
-    }
-
-    // If the requirement is defined in `Movable`, it must be either the move-initialization or
-    // move-assignment method.
-    if concept == core.movable.type {
-      let d = MethodImpl.ID(requirement)!
-      switch self[d].introducer.value {
-      case .set:
-        return .moveInitialization
-      case .inout:
-        return .moveAssignment
-      default:
-        unreachable()
-      }
-    }
-
-    // If the requirement is defined in `Copyable`, it must be the copy method.
-    if concept == core.copyable.type {
-      assert(requirement.kind == FunctionDecl.self)
+    case core.movable.moveInitialize.rawValue:
+      return .moveInitialization
+    case core.movable.moveAssign.rawValue:
+      return .moveAssignment
+    case core.copyable.copy.rawValue:
       return .copy
-    }
-
-    // Requirement is not synthesizable.
-    return nil
-  }
-
-  /// Returns a table mapping each parameter of `d` to its default argument if `d` is a function,
-  /// initializer, method or subscript declaration. Otherwise, returns `nil`.
-  public func defaultArguments(of d: AnyDeclID) -> [AnyExprID?]? {
-    let parameters: [ParameterDecl.ID]
-    switch d.kind {
-    case FunctionDecl.self:
-      parameters = self[FunctionDecl.ID(d)!].parameters
-    case InitializerDecl.self:
-      parameters = self[InitializerDecl.ID(d)!].parameters
-    case MethodDecl.self:
-      parameters = self[MethodDecl.ID(d)!].parameters
-    case SubscriptDecl.self:
-      parameters = self[SubscriptDecl.ID(d)!].parameters
     default:
       return nil
     }
-    return self[parameters].map(\.defaultValue)
+  }
+
+  /// Returns a table mapping each parameter of `d` to its default argument if `d` is a function,
+  /// initializer, method or subscript declaration; otherwise, returns `nil`.
+  public func defaultArguments(of d: AnyDeclID) -> [AnyExprID?]? {
+    runtimeParameters(of: d)?.map({ self[$0].defaultValue })
+  }
+
+  /// Returns the run-time parameters of `d` iff `d` is callable.
+  public func runtimeParameters(of d: AnyDeclID) -> [ParameterDecl.ID]? {
+    switch d.kind {
+    case FunctionDecl.self:
+      return self[FunctionDecl.ID(d)!].parameters
+    case InitializerDecl.self:
+      return self[InitializerDecl.ID(d)!].parameters
+    case MethodDecl.self:
+      return self[MethodDecl.ID(d)!].parameters
+    case SubscriptDecl.self:
+      return self[SubscriptDecl.ID(d)!].parameters
+    default:
+      return nil
+    }
+  }
+
+  /// Returns the generic parameters introduced by `d`.
+  public func genericParameters(introducedBy d: AnyDeclID) -> [GenericParameterDecl.ID] {
+    if let s = self[d] as? GenericScope {
+      return s.genericParameters
+    } else {
+      return []
+    }
   }
 
   /// Returns the name of `d` unless `d` is anonymous.
@@ -409,12 +426,74 @@ public struct AST {
     }
   }
 
+  /// Retutns the declaration of the implementation of `d` with effect `a`, if any.
+  public func implementation<T: BundleDecl>(_ a: AccessEffect, of d: T.ID) -> T.Variant.ID? {
+    self[d].impls.first(where: { (i) in self[i].introducer.value == a })
+  }
+
   /// Returns `true` iff `s` is a consuming for-loop.
   public func isConsuming(_ s: ForStmt.ID) -> Bool {
     self[self[self[s].binding].pattern].introducer.value.isConsuming
   }
 
-  /// Returns the source site of `expr`
+  /// Returns `true` if `e` is an expression starting with an implicit name qualification.
+  public func isImplicitlyQualified(_ e: AnyExprID) -> Bool {
+    switch e.kind {
+    case FunctionCallExpr.self:
+      return isImplicitlyQualified(self[FunctionCallExpr.ID(e)!].callee)
+    case NameExpr.self:
+      return isImplicitlyQualified(NameExpr.ID(e)!)
+    default:
+      return false
+    }
+  }
+
+  /// Returns `true` if `e` is an expression starting with an implicit name qualification.
+  public func isImplicitlyQualified(_ e: NameExpr.ID) -> Bool {
+    switch self[e].domain {
+    case .implicit:
+      return true
+    case .explicit(let e):
+      return isImplicitlyQualified(e)
+    case .none, .operand:
+      return false
+    }
+  }
+
+  /// Returns `true` iff `e` is an expression that's marked for mutation.
+  public func isMarkedForMutation(_ e: AnyExprID) -> Bool {
+    switch e.kind {
+    case InoutExpr.self:
+      return true
+    case NameExpr.self:
+      return isMarkedForMutation(NameExpr.ID(e)!)
+    case SubscriptCallExpr.self:
+      return isMarkedForMutation(self[SubscriptCallExpr.ID(e)!].callee)
+    default:
+      return false
+    }
+  }
+
+  /// Returns `true` iff `e` is an expression that's marked for mutation.
+  public func isMarkedForMutation(_ e: NameExpr.ID) -> Bool {
+    switch self[e].domain {
+    case .explicit(let n):
+      return isMarkedForMutation(n)
+    default:
+      return false
+    }
+  }
+
+  /// Returns `true` iff `e` is an expression that's marked for mutation.
+  public func isMarkedForMutation(_ e: FoldedSequenceExpr) -> Bool {
+    if case .leaf(let l) = e {
+      return isMarkedForMutation(l)
+    } else {
+      return false
+    }
+  }
+
+  /// Returns the source site of `expr`.
   public func site(of expr: FoldedSequenceExpr) -> SourceRange {
     switch expr {
     case .leaf(let i):
@@ -423,7 +502,7 @@ public struct AST {
     case .infix(_, let lhs, let rhs):
       let lhsSite = site(of: lhs)
       let rhsSite = site(of: rhs)
-      return lhsSite.extended(upTo: rhsSite.end)
+      return lhsSite.extended(upTo: rhsSite.endIndex)
     }
   }
 

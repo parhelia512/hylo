@@ -1,5 +1,5 @@
 /// The description of a core trait that has been loaded in an AST.
-public protocol CoreTraitDescription {
+public protocol CoreTraitDescription: Codable {
 
   /// The identifier of the trait declaration in the AST.
   var decl: TraitDecl.ID { get }
@@ -7,7 +7,7 @@ public protocol CoreTraitDescription {
 }
 
 /// A view of the traits in Hylo's standard library that are known by the compiler.
-public struct CoreTraits {
+public struct CoreTraits: Codable {
 
   /// `Hylo.Collection`.
   public let collection: CollectionDescription
@@ -105,11 +105,15 @@ public struct CopyableDescription: CoreTraitDescription {
   /// The identifier of the trait declaration.
   public let decl: TraitDecl.ID
 
+  /// The `copy()` requirement.
+  public let copy: FunctionDecl.ID
+
   /// Creates an instance referring to the declaration of `Hylo.Copyable` in `ast`.
   ///
   /// - Requires: The standard library must have been loaded in `ast`.
   public init(_ ast: AST) {
     self.decl = ast.coreTrait("Copyable")!.decl
+    self.copy = FunctionDecl.ID(ast.requirements(Name(stem: "copy"), in: self.decl)[0])!
   }
 
 }
@@ -262,10 +266,8 @@ public struct MovableDescription: CoreTraitDescription {
     let move = MethodDecl.ID(ast[self.decl].members[0])!
     assert(ast[move].identifier.value == "take_value")
 
-    self.moveInitialize = MethodImpl.ID(
-      ast[move].impls.first(where: { ast[$0].introducer.value == .set })!)!
-    self.moveAssign = MethodImpl.ID(
-      ast[move].impls.first(where: { ast[$0].introducer.value == .inout })!)!
+    self.moveInitialize = ast.implementation(.set, of: move)!
+    self.moveAssign = ast.implementation(.inout, of: move)!
   }
 
 }

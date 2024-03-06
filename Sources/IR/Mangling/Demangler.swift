@@ -27,6 +27,8 @@ struct Demangler {
         demangled = take(AssociatedValueDecl.self, qualifiedBy: qualification, from: &stream)
       case .boundGenericType:
         demangled = takeBoundGenericType(from: &stream)
+      case .bufferType:
+        demangled = takeBufferType(from: &stream)
       case .builtinIntegerType:
         demangled = takeBuiltinIntegerType(from: &stream)
       case .builtinFloatType:
@@ -59,8 +61,8 @@ struct Demangler {
         demangled = takeNominalType(declaredBy: GenericParameterDecl.self, from: &stream)
       case .importDecl:
         demangled = take(ImportDecl.self, qualifiedBy: qualification, from: &stream)
-      case .lambdaType:
-        demangled = takeLambdaType(from: &stream)
+      case .arrowType:
+        demangled = takeArrowType(from: &stream)
       case .lookup:
         demangled = takeLookup(from: &stream)
       case .memberwiseInitializerDecl:
@@ -381,6 +383,15 @@ struct Demangler {
     return .type(.boundGeneric(base: b, arguments: parameterization))
   }
 
+  /// Demangles a buffer type from `stream`.
+  private mutating func takeBufferType(from stream: inout Substring) -> DemangledSymbol? {
+    guard
+      let element = demangleType(from: &stream),
+      let count = takeInteger(from: &stream)  // TODO: arbitrary compile-time values
+    else { return nil }
+    return .type(.buffer(element: element, count: Int(count.rawValue)))
+  }
+
   /// Demangles a built-in integer type from `stream`.
   private mutating func takeBuiltinIntegerType(from stream: inout Substring) -> DemangledSymbol? {
     guard
@@ -439,8 +450,8 @@ struct Demangler {
     return .type(.existentialTrait(traits))
   }
 
-  /// Demangles a lambda type from `stream`.
-  private mutating func takeLambdaType(from stream: inout Substring) -> DemangledSymbol? {
+  /// Demangles an arrow type from `stream`.
+  private mutating func takeArrowType(from stream: inout Substring) -> DemangledSymbol? {
     guard
       let environment = demangleType(from: &stream),
       let inputCount = takeInteger(from: &stream)
@@ -460,7 +471,7 @@ struct Demangler {
       let output = demangleType(from: &stream)
     else { return nil }
 
-    return .type(.lambda(effect: .let, environment: environment, inputs: inputs, output: output))
+    return .type(.arrow(effect: .let, environment: environment, inputs: inputs, output: output))
   }
 
   /// Demangles a nominal type declared as an entity of type `T` from `stream`.
@@ -565,8 +576,8 @@ struct Demangler {
     return .type(.union(elements))
   }
 
-  /// If `stream` starts with a mangling operator, consumes and returns it. Otherwise, returns
-  /// `nil` without mutating `stream`.
+  /// If `stream` starts with a mangling operator, consumes and returns it; returns
+  /// `nil` without mutating `stream` otherwise.
   private func takeOperator(from stream: inout Substring) -> ManglingOperator? {
     if stream.isEmpty { return nil }
 
@@ -627,8 +638,8 @@ struct Demangler {
     return r
   }
 
-  /// Assuming `stream` starts with a mangled integer, consumes and returns it. Returns `nil` iff
-  /// data seems corrupted.
+  /// Assuming `stream` starts with a mangled integer, consumes and returns it; returns `nil`
+  /// otherwise.
   private func takeInteger(from stream: inout Substring) -> Base64VarUInt? {
     guard let (v, i) = Base64VarUInt.decode(from: stream) else {
       return nil

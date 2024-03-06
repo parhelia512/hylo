@@ -61,7 +61,7 @@ extension LLVM.Module {
 
     // Define the addressor projecting the allocated access.
     incorporate(s.initializer, of: m, from: ir)
-    let initializer = function(named: ir.base.mangled(s.initializer))!
+    let initializer = function(named: ir.llvmName(of: s.initializer))!
     let addressor = declareFunction(prefix, .init(from: [], to: ptr, in: &self))
 
     let entry = appendBlock(to: addressor)
@@ -106,7 +106,7 @@ extension LLVM.Module {
     let b = appendBlock(to: main)
     let p = endOf(b)
 
-    let transpilation = function(named: ir.base.mangled(f))!
+    let transpilation = function(named: ir.llvmName(of: f))!
 
     let val32 = ir.ast.coreType("Int32")!
     switch m[f].output {
@@ -136,6 +136,7 @@ extension LLVM.Module {
     let fields: [LLVM.IRType] = [
       word(),  // size
       word(),  // alignment
+      word(),  // stride
       ptr,  // representation
     ]
     return LLVM.StructType(fields, in: &self)
@@ -196,7 +197,7 @@ extension LLVM.Module {
   ///
   /// - Note: the type of a function in Hylo IR typically doesn't match the type of its transpiled
   ///   form 1-to-1, as return values are often passed by references.
-  private mutating func transpiledType(_ t: LambdaType) -> LLVM.FunctionType {
+  private mutating func transpiledType(_ t: ArrowType) -> LLVM.FunctionType {
     // Return value is passed by reference.
     var parameters: Int = t.inputs.count + 1
 
@@ -215,6 +216,8 @@ extension LLVM.Module {
     from ir: IR.Program
   ) -> LLVM.IRValue {
     switch c {
+    case let v as IR.WordConstant:
+      return transpiledConstant(v, usedIn: m, from: ir)
     case let v as IR.IntegerConstant:
       return transpiledConstant(v, usedIn: m, from: ir)
     case let v as IR.FloatingPointConstant:
@@ -230,6 +233,13 @@ extension LLVM.Module {
     default:
       unreachable()
     }
+  }
+
+  /// Returns the LLVM IR value corresponding to the Hylo IR constant `c` when used in `m` in `ir`.
+  private mutating func transpiledConstant(
+    _ c: IR.WordConstant, usedIn m: IR.Module, from ir: IR.Program
+  ) -> LLVM.IRValue {
+    word().constant(c.value)
   }
 
   /// Returns the LLVM IR value corresponding to the Hylo IR constant `c` when used in `m` in `ir`.
@@ -354,6 +364,7 @@ extension LLVM.Module {
       aggregating: [
         word().constant(layout.size),
         word().constant(layout.alignment),
+        word().constant(layout.stride),
         ptr.null,
       ],
       in: &self)
@@ -383,6 +394,7 @@ extension LLVM.Module {
       aggregating: [
         word().constant(layout.size),
         word().constant(layout.alignment),
+        word().constant(layout.stride),
         ptr.null,
       ],
       in: &self)
@@ -438,8 +450,8 @@ extension LLVM.Module {
   private mutating func declare(
     _ ref: IR.FunctionReference, from ir: IR.Program
   ) -> LLVM.Function {
-    let t = transpiledType(LambdaType(ref.type.ast)!)
-    return declareFunction(ir.base.mangled(ref.function), t)
+    let t = transpiledType(ArrowType(ref.type.ast)!)
+    return declareFunction(ir.llvmName(of: ref.function), t)
   }
 
   /// Inserts and returns the transpiled declaration of `f`, which is a function of `m` in `ir`.
@@ -450,7 +462,7 @@ extension LLVM.Module {
 
     // Parameters and return values are passed by reference.
     let parameters = Array(repeating: ptr as LLVM.IRType, count: m[f].inputs.count + 1)
-    let transpilation = declareFunction(ir.base.mangled(f), .init(from: parameters, in: &self))
+    let transpilation = declareFunction(ir.llvmName(of: f), .init(from: parameters, in: &self))
 
     configureAttributes(transpilation, transpiledFrom: f, of: m)
     configureInputAttributes(transpilation.parameters.dropLast(), transpiledFrom: f, in: m)
@@ -470,7 +482,7 @@ extension LLVM.Module {
     let r = LLVM.StructType([ptr, ptr], in: &self)
     let parameters = Array(repeating: ptr as LLVM.IRType, count: m[f].inputs.count + 1)
     let transpilation = declareFunction(
-      ir.base.mangled(f), .init(from: parameters, to: r, in: &self))
+      ir.llvmName(of: f), .init(from: parameters, to: r, in: &self))
 
     configureAttributes(transpilation, transpiledFrom: f, of: m)
     configureInputAttributes(transpilation.parameters.dropFirst(), transpiledFrom: f, in: m)
@@ -520,8 +532,6 @@ extension LLVM.Module {
   ) {
     addAttribute(named: .noalias, to: llvmParameter)
     addAttribute(named: .nofree, to: llvmParameter)
-    addAttribute(named: .nonnull, to: llvmParameter)
-    addAttribute(named: .noundef, to: llvmParameter)
 
     if !m[f].isSubscript {
       addAttribute(named: .nocapture, to: llvmParameter)
@@ -559,7 +569,7 @@ extension LLVM.Module {
     /// one-to-one mapping from Hylo registers to LLVM registers.
     var byproduct: [IR.InstructionID: (slide: LLVM.IRValue, frame: LLVM.IRValue)] = [:]
 
-    /// The address of the function's frame if `f` is a subscript. Otherwise, `nil`.
+    /// The address of the function's frame if `f` is a subscript, or `nil` otherwise.
     let frame: LLVM.IRValue?
 
     /// The prologue of the transpiled function, which contains its stack allocations.
@@ -601,6 +611,8 @@ extension LLVM.Module {
         insert(addressToPointer: i)
       case is IR.AdvancedByBytes:
         insert(advancedByBytes: i)
+      case is IR.AdvancedByStrides:
+        insert(advancedByStrides: i)
       case is IR.AllocStack:
         insert(allocStack: i)
       case is IR.Access:
@@ -635,6 +647,8 @@ extension LLVM.Module {
         insert(load: i)
       case is IR.MarkState:
         return
+      case is IR.MemoryCopy:
+        insert(memoryCopy: i)
       case is IR.OpenCapture:
         insert(openCapture: i)
       case is IR.OpenUnion:
@@ -683,10 +697,26 @@ extension LLVM.Module {
     }
 
     /// Inserts the transpilation of `i` at `insertionPoint`.
+    func insert(advancedByStrides i: IR.InstructionID) {
+      let s = m[i] as! AdvancedByStrides
+
+      let base = llvm(s.base)
+      let baseType = ir.llvm(m.type(of: s.base).ast, in: &self)
+      let indices = [i32.constant(0), i32.constant(s.offset)]
+      let v = insertGetElementPointerInBounds(
+        of: base, typed: baseType, indices: indices, at: insertionPoint)
+      register[.register(i)] = v
+    }
+
+    /// Inserts the transpilation of `i` at `insertionPoint`.
     func insert(allocStack i: IR.InstructionID) {
       let s = m[i] as! AllocStack
       let t = ir.llvm(s.allocatedType, in: &self)
-      register[.register(i)] = insertAlloca(t, atEntryOf: transpilation)
+      if layout.storageSize(of: t) == 0 {
+        register[.register(i)] = ptr.null
+      } else {
+        register[.register(i)] = insertAlloca(t, atEntryOf: transpilation)
+      }
     }
 
     /// Inserts the transpilation of `i` at `insertionPoint`.
@@ -934,6 +964,11 @@ extension LLVM.Module {
         let source = llvm(s.operands[0])
         register[.register(i)] = insertZeroExtend(source, to: target, at: insertionPoint)
 
+      case .sext(_, let t):
+        let target = ir.llvm(builtinType: t, in: &self)
+        let source = llvm(s.operands[0])
+        register[.register(i)] = insertSignExtend(source, to: target, at: insertionPoint)
+
       case .inttoptr(_):
         let source = llvm(s.operands[0])
         register[.register(i)] = insertIntToPtr(source, at: insertionPoint)
@@ -1018,6 +1053,20 @@ extension LLVM.Module {
     }
 
     /// Inserts the transpilation of `i` at `insertionPoint`.
+    func insert(memoryCopy i: IR.InstructionID) {
+      let s = m[i] as! MemoryCopy
+
+      let memcpy = LLVM.Function(
+        intrinsic(named: Intrinsic.llvm.memcpy, for: [ptr, ptr, i32])!)!
+      let source = llvm(s.source)
+      let target = llvm(s.target)
+
+      let l = ConcreteTypeLayout(of: m.type(of: s.source).ast, definedIn: ir, forUseIn: &self)
+      let byteCount = i32.constant(l.size)
+      _ = insertCall(memcpy, on: [target, source, byteCount, i1.zero], at: insertionPoint)
+    }
+
+    /// Inserts the transpilation of `i` at `insertionPoint`.
     func insert(openCapture i: IR.InstructionID) {
       let s = m[i] as! OpenCapture
       register[.register(i)] = insertLoad(ptr, from: llvm(s.source), at: insertionPoint)
@@ -1098,14 +1147,14 @@ extension LLVM.Module {
     func insert(switch i: IR.InstructionID) {
       let s = m[i] as! Switch
 
-      // Pick the case 0 as the "default".
-      let cases = s.successors[1...].enumerated().map { (value, destination) in
+      let branches = s.successors.enumerated().map { (value, destination) in
         (word().constant(UInt64(value)), block[destination]!)
       }
 
+      // The last branch is the "default".
       let n = llvm(s.index)
       insertSwitch(
-        on: n, cases: cases, default: block[s.successors[0]]!,
+        on: n, cases: branches.dropLast(), default: branches.last!.1,
         at: insertionPoint)
     }
 
@@ -1158,15 +1207,15 @@ extension LLVM.Module {
     }
 
     /// Returns the callee of `s`.
-    func unpackCallee(of s: Operand) -> LambdaContents {
+    func unpackCallee(of s: Operand) -> ArrowContents {
       if case .constant(let f) = s {
         let f = transpiledConstant(f, usedIn: m, from: ir)
         let t = LLVM.Function(f)!.valueType
         return .init(function: f, type: t, environment: [])
       }
 
-      // `s` is a lambda.
-      let hyloType = LambdaType(m.type(of: s).ast)!
+      // `s` is an arrow.
+      let hyloType = ArrowType(m.type(of: s).ast)!
       let llvmType = StructType(ir.llvm(hyloType, in: &self))!
       let lambda = llvm(s)
 
@@ -1175,11 +1224,15 @@ extension LLVM.Module {
         of: lambda, typed: llvmType, index: 0, at: insertionPoint)
       f = insertLoad(ptr, from: f, at: insertionPoint)
 
+      let e = insertGetStructElementPointer(
+        of: lambda, typed: llvmType, index: 1, at: insertionPoint)
+      let captures = StructType(ir.llvm(hyloType.environment, in: &self))!
+
       // Following elements constitute the environment.
       var environment: [LLVM.IRValue] = []
       for (i, c) in hyloType.captures.enumerated() {
         var x = insertGetStructElementPointer(
-          of: lambda, typed: llvmType, index: i + 1, at: insertionPoint)
+          of: e, typed: captures, index: i, at: insertionPoint)
 
         // Remote captures are passed deferenced.
         if c.type.base is RemoteType {
@@ -1230,8 +1283,8 @@ extension LLVMProgram: CustomStringConvertible {
 
 }
 
-/// The contents of a lambda.
-private struct LambdaContents {
+/// The contents of an arrow.
+private struct ArrowContents {
 
   /// A pointer to the underlying thin function.
   let function: LLVM.IRValue
@@ -1239,7 +1292,20 @@ private struct LambdaContents {
   /// The type `function`.
   let type: LLVM.IRType
 
-  /// The lambda's environment.
+  /// The arrow's environment.
   let environment: [LLVM.IRValue]
+
+}
+
+extension IR.Program {
+
+  /// Returns the name of `f` in LLVM IR.
+  func llvmName(of f: IR.Function.ID) -> String {
+    if case .lowered(let d) = f.value {
+      return FunctionDecl.ID(d).flatMap({ base[$0].externalName }) ?? base.mangled(f)
+    } else {
+      return base.mangled(f)
+    }
+  }
 
 }

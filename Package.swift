@@ -1,10 +1,11 @@
-// swift-tools-version:5.7
+// swift-tools-version:5.9
+import Foundation
 import PackageDescription
 
 #if os(Windows)
-  let onWindows = true
+  let osIsWindows = true
 #else
-  let onWindows = false
+  let osIsWindows = false
 #endif
 
 /// Settings to be passed to swiftc for all targets.
@@ -12,11 +13,19 @@ let allTargetsSwiftSettings: [SwiftSetting] = [
   .unsafeFlags(["-warnings-as-errors"])
 ]
 
+/// Dependencies for documentation extraction.
+///
+/// Most people don't need to extract documentation; set `HYLO_ENABLE_DOC_GENERATION` in your
+/// environment if you do.
+let docGenerationDependency: [Package.Dependency] =
+  ProcessInfo.processInfo.environment["HYLO_ENABLE_DOC_GENERATION"] != nil
+  ? [.package(url: "https://github.com/apple/swift-docc-plugin.git", from: "1.1.0")] : []
+
 let package = Package(
   name: "Hylo",
 
   platforms: [
-    .macOS(.v13)
+    .macOS(.v12)
   ],
 
   products: [
@@ -32,6 +41,9 @@ let package = Package(
       url: "https://github.com/apple/swift-collections.git",
       from: "1.0.0"),
     .package(
+      url: "https://github.com/apple/swift-algorithms.git",
+      from: "1.2.0"),
+    .package(
       url: "https://github.com/hylo-lang/Durian.git",
       from: "1.2.0"),
     .package(
@@ -43,11 +55,11 @@ let package = Package(
     .package(
       url: "https://github.com/apple/swift-format",
       from: "508.0.1"),
-    .package(url: "https://github.com/apple/swift-docc-plugin.git", from: "1.1.0"),
     .package(
       url: "https://github.com/SwiftPackageIndex/SPIManifest.git",
       from: "0.12.0"),
-  ],
+  ]
+    + docGenerationDependency,
 
   targets: [
     // The compiler's executable target.
@@ -82,7 +94,6 @@ let package = Package(
       dependencies: [
         "Utils",
         "Core",
-        "StandardLibrary",
         .product(name: "Collections", package: "swift-collections"),
         .product(name: "Durian", package: "Durian"),
         .product(name: "BigInt", package: "BigInt"),
@@ -119,6 +130,7 @@ let package = Package(
       dependencies: [
         .product(name: "BigInt", package: "BigInt"),
         .product(name: "Collections", package: "swift-collections"),
+        .product(name: "Algorithms", package: "swift-algorithms"),
       ],
       swiftSettings: allTargetsSwiftSettings),
 
@@ -129,14 +141,15 @@ let package = Package(
 
     .target(
       name: "StandardLibrary",
+      dependencies: ["FrontEnd", "Utils"],
       path: "StandardLibrary",
-      resources: [.copy("Sources")],
+      exclude: ["Sources"],
       swiftSettings: allTargetsSwiftSettings),
 
     .plugin(
       name: "TestGeneratorPlugin", capability: .buildTool(),
       // Workaround for SPM bug; see PortableBuildToolPlugin.swift
-      dependencies: onWindows ? [] : ["GenerateHyloFileTests"]),
+      dependencies: osIsWindows ? [] : ["GenerateHyloFileTests"]),
 
     .executableTarget(
       name: "GenerateHyloFileTests",
@@ -144,12 +157,12 @@ let package = Package(
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
         "Utils",
       ],
-      swiftSettings: allTargetsSwiftSettings + [.unsafeFlags(["-parse-as-library"])]),
+      swiftSettings: allTargetsSwiftSettings),
 
     // Test targets.
     .testTarget(
       name: "UtilsTests",
-      dependencies: ["Utils"],
+      dependencies: ["Utils", .product(name: "Algorithms", package: "swift-algorithms")],
       swiftSettings: allTargetsSwiftSettings),
 
     .testTarget(
@@ -164,19 +177,35 @@ let package = Package(
 
     .testTarget(
       name: "HyloTests",
-      dependencies: ["Core", "FrontEnd", "IR", "TestUtils", "StandardLibrary"],
+      dependencies: [
+        "Core", "FrontEnd", "IR", "TestUtils", "StandardLibrary", "Utils",
+        .product(name: "Algorithms", package: "swift-algorithms"),
+      ],
+      exclude: ["TestCases"],
       swiftSettings: allTargetsSwiftSettings,
       plugins: ["TestGeneratorPlugin"]),
 
     .testTarget(
       name: "EndToEndTests",
       dependencies: ["Driver", "TestUtils"],
+      exclude: ["TestCases"],
       swiftSettings: allTargetsSwiftSettings,
       plugins: ["TestGeneratorPlugin"]),
 
     .testTarget(
       name: "LibraryTests",
       dependencies: ["Driver", "TestUtils"],
+      exclude: ["TestCases"],
       swiftSettings: allTargetsSwiftSettings,
       plugins: ["TestGeneratorPlugin"]),
-  ])
+  ]
+    // On Windows we have a dummy library target that can be used to build all the build tool
+    // dependencies for non-reentrant builds.  See SPMBuildToolSupport/README.md for more info.
+    + (osIsWindows
+      ? [
+        .target(
+          name: "BuildToolDependencies",
+          dependencies: ["GenerateHyloFileTests"],
+          swiftSettings: allTargetsSwiftSettings)
+      ] : []) as [PackageDescription.Target]
+)

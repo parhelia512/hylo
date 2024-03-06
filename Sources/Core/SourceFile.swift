@@ -98,7 +98,7 @@ public struct SourceFile {
   /// - Requires: The bounds of `range` are valid positions in `self`.
   public subscript(_ range: SourceRange) -> Substring {
     precondition(range.file.url == url, "invalid range")
-    return text[range.start ..< range.end]
+    return text[range.startIndex ..< range.endIndex]
   }
 
   /// Returns the position corresponding to `i` in `text`.
@@ -244,7 +244,7 @@ extension SourceFile: Codable {
     /// decoding of an `AST`.
     public init() { allInstances = [] }
 
-    /// Creates an instance containing `allInstances`
+    /// Creates an instance containing `allInstances`.
     fileprivate init(allInstances: [Storage]) { self.allInstances = allInstances }
 
     /// The values that will be used to reconstitute `SourceFile`s.
